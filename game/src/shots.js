@@ -1,79 +1,84 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The screenshot scenes behind ?shot=title|drive|chase|mission. Each one stages a
+// real game state (the same entities and rules the live game uses) at a frozen
+// moment, so the frame is honest: a title over the city, a drive through traffic,
+// a three-star chase, and the first mission marker on the pier.
+import { WANTED } from './config.js';
+import { makeCar } from './world.js';
+import { enterCar } from './vehicles.js';
+import { startCampaign, startMissionAt } from './missions.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
+function placeTraffic(state, spots) {
+  let i = 0;
+  for (const car of state.cars) {
+    if (car.kind !== 'traffic') continue;
+    const spot = spots[i % spots.length];
+    car.x = spot.x;
+    car.y = spot.y;
+    car.angle = spot.angle;
+    car.dir = spot.dir;
+    car.speed = spot.speed;
+    i += 1;
+    if (i >= spots.length) break;
   }
-  return Infinity;
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function putPlayerInCar(state, x, y, angle, speed) {
+  const car = state.cars.find((c) => c.kind === 'civilian' && !c.driver) || state.cars[0];
+  car.x = x;
+  car.y = y;
+  car.angle = angle;
+  car.speed = speed;
+  car.parked = false;
+  state.player.x = x;
+  state.player.y = y;
+  enterCar(state, car);
+  if (state.events) state.events.length = 0;
+  return car;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export function stageShot(name, state) {
+  state.time = 2.4;
+  if (name === 'title') {
+    state.screen = 'title';
+    state.saveExists = true;
+    return;
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  state.screen = 'play';
+  if (name === 'drive') {
+    startCampaign(state);
+    state.briefTimer = 0;
+    // Eastbound on the Old Market high street, traffic around, one star of heat.
+    putPlayerInCar(state, 1080, 694, 0, 215);
+    placeTraffic(state, [
+      { x: 1330, y: 694, angle: 0, dir: 0, speed: 150 },
+      { x: 830, y: 646, angle: Math.PI, dir: 2, speed: 150 },
+      { x: 1470, y: 646, angle: Math.PI, dir: 2, speed: 140 },
+    ]);
+    state.wantedHeat = WANTED.thresholds[1] + 3;
+    state.wanted = 1;
+    state.cash = 500;
+    return;
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  if (name === 'chase') {
+    startMissionAt(state, 3);
+    state.briefTimer = 4;
+    // Southbound at speed with three units on the tail and the hideout ahead.
+    putPlayerInCar(state, 1696, 940, Math.PI / 2, 320);
+    state.police = [
+      makeCar(1648, 700, Math.PI / 2, '#e8ecf2', 'police'),
+      makeCar(1744, 660, Math.PI / 2, '#e8ecf2', 'police'),
+      makeCar(1696, 520, Math.PI / 2, '#e8ecf2', 'police'),
+    ];
+    for (const cop of state.police) cop.speed = 300;
+    state.wantedHeat = WANTED.thresholds[3] + 6;
+    state.wanted = 3;
+    state.cash = 2500;
+    return;
+  }
+  // mission: on foot on Pier 9, the package marker glowing at the end of the pier.
+  startCampaign(state);
+  state.player.x = 548;
+  state.player.y = 2128;
+  state.player.angle = Math.PI / 2;
+  state.cash = 0;
 }
