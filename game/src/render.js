@@ -330,9 +330,23 @@ export function createRenderer(canvas) {
     ctx.fillStyle = '#20242c';
     ctx.fillRect(6, -2.5, 13, 5); // the pistol
     if (p.muzzle > 0) {
+      // Muzzle flash: a narrow burst cone out of the pistol's tip, ahead of
+      // the body's silhouette, with a paler core. A plain disc here sat in
+      // the player's own yellow and merged with the body and the pistol slot
+      // into a single Pac-Man blob.
       ctx.fillStyle = '#ffd34d';
       ctx.beginPath();
-      ctx.arc(24, 0, 7, 0, Math.PI * 2);
+      ctx.moveTo(19, -4);
+      ctx.lineTo(40, 0);
+      ctx.lineTo(19, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff6c8';
+      ctx.beginPath();
+      ctx.moveTo(19, -2);
+      ctx.lineTo(32, 0);
+      ctx.lineTo(19, 2);
+      ctx.closePath();
       ctx.fill();
     }
     ctx.restore();

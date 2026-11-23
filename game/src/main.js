@@ -152,36 +152,48 @@ function firePistol(fromKey) {
   let endX = p.x + dx * PISTOL.range;
   let endY = p.y + dy * PISTOL.range;
   let bestT = PISTOL.range;
-  // Pedestrians along the line fall; police cars take damage and answer back.
+  // One bullet stops in the first target it reaches: scan for the nearest
+  // pedestrian or police car along the line first, then apply that single
+  // hit. (Applying the effects while scanning let one shot drop a far target
+  // and a near one alike, whenever the far one happened to be listed first.)
+  let hitPed = null;
+  let hitCop = null;
   for (const ped of state.peds) {
     if (ped.down > 0) continue;
     const t = (ped.x - p.x) * dx + (ped.y - p.y) * dy;
-    if (t < 0 || t > bestT) continue;
+    if (t < 0 || t >= bestT) continue;
     const side = Math.abs((ped.x - p.x) * -dy + (ped.y - p.y) * dx);
     if (side < 15) {
       bestT = t;
-      endX = ped.x;
-      endY = ped.y;
-      ped.down = 8;
-      scarePeds(state, ped.x, ped.y, 260);
-      commitCrime(state, WANTED.hitPed, p.x, p.y, state.police.length > 0);
+      hitPed = ped;
+      hitCop = null;
     }
   }
   for (const cop of state.police) {
     const t = (cop.x - p.x) * dx + (cop.y - p.y) * dy;
-    if (t < 0 || t > bestT) continue;
+    if (t < 0 || t >= bestT) continue;
     const side = Math.abs((cop.x - p.x) * -dy + (cop.y - p.y) * dx);
     if (side < 26) {
       bestT = t;
-      endX = cop.x;
-      endY = cop.y;
-      damageCar(cop, 26);
-      if (cop.damage >= 100) {
-        cop.wrecked = true;
-        cop.speed = 0;
-      }
-      commitCrime(state, WANTED.hitPolice, p.x, p.y, true);
+      hitCop = cop;
+      hitPed = null;
     }
+  }
+  if (hitPed) {
+    endX = hitPed.x;
+    endY = hitPed.y;
+    hitPed.down = 8;
+    scarePeds(state, hitPed.x, hitPed.y, 260);
+    commitCrime(state, WANTED.hitPed, p.x, p.y, state.police.length > 0);
+  } else if (hitCop) {
+    endX = hitCop.x;
+    endY = hitCop.y;
+    damageCar(hitCop, 26);
+    if (hitCop.damage >= 100) {
+      hitCop.wrecked = true;
+      hitCop.speed = 0;
+    }
+    commitCrime(state, WANTED.hitPolice, p.x, p.y, true);
   }
   state.tracers.push({ x1: p.x + dx * 20, y1: p.y + dy * 20, x2: endX, y2: endY, life: 0.14 });
   commitCrime(state, WANTED.gunshot, p.x, p.y);
@@ -227,9 +239,20 @@ function processEvents() {
 }
 
 let saveTimer = 0;
+let lastScreen = state.screen;
+let lastMode = state.player.mode;
 
 function step(dt) {
   state.time += dt;
+  if (state.screen !== lastScreen || state.player.mode !== lastMode) {
+    // A one-shot press belongs to the context it was made in. Dropping the
+    // pending actions at every screen or foot/car transition stops, say, an
+    // Enter hit during play from dismissing the busted screen that replaced
+    // play a step later, or an R hit in a car from reloading on foot.
+    lastScreen = state.screen;
+    lastMode = state.player.mode;
+    input.clearActions();
+  }
   if (state.screen !== 'play') {
     input.consumeBlur();
     audio.setSiren(false);
