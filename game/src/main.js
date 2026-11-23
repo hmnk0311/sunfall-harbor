@@ -3,10 +3,10 @@
 // modules queued become sound and wanted heat, and the renderer paints the frame.
 // Screens: title, play, paused, busted, wasted and campaign complete.
 //
-// ?seed=N fixes the city. ?shot=title|drive|chase|mission (with &seed=N) stages
-// that scene instead of running the loop, paints it twice and sets
+// ?seed=N fixes the city. ?shot=chase|foot|combat|mission (with &seed=N)
+// stages that scene instead of running the loop, paints it twice and sets
 // window.__shotReady for a screenshot.
-import { PISTOL, SAVE_KEY, STEP, WANTED } from './config.js';
+import { CAR, PISTOL, SAVE_KEY, STEP, WANTED, WORLD } from './config.js';
 import { createRandom } from './random.js';
 import { createGame, scarePeds, updatePeds } from './world.js';
 import {
@@ -14,12 +14,12 @@ import {
 } from './input.js';
 import { createAudio } from './audio.js';
 import {
-  enterCar, exitCar, nearestEnterableCar, updateCarContacts, updatePlayerCar, updatePlayerFoot, updateTraffic,
+  damageCar, enterCar, exitCar, nearestEnterableCar, updateCarContacts, updatePlayerCar, updatePlayerFoot, updateTraffic,
 } from './vehicles.js';
 import { commitCrime, updatePolice, updateWanted } from './police.js';
 import { onEnterCar, startCampaign, startMissionAt, updateMissions } from './missions.js';
 import { createRenderer } from './render.js';
-import { stageShot } from './shots.js';
+import { stageShot } from './screenshot-scenes.js';
 
 const MAX_FRAME = 0.25;
 
@@ -42,8 +42,20 @@ function readSave() {
     const raw = window.localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const save = JSON.parse(raw);
-    if (typeof save.cash !== 'number' || typeof save.missionIndex !== 'number') return null;
-    return save;
+    if (!save || typeof save !== 'object' || Array.isArray(save)) return null;
+    // Validate the whole save, not just two types: a fractional mission index
+    // used to index mission tables with 1.5 and freeze or corrupt the run,
+    // and non-finite cash or coordinates poisoned everything they touched.
+    if (!Number.isFinite(save.cash) || save.cash < 0) return null;
+    if (!Number.isInteger(save.missionIndex) || save.missionIndex < 0 || save.missionIndex > 4) return null;
+    if (!Number.isFinite(save.x) || save.x < 0 || save.x > WORLD.width) return null;
+    if (!Number.isFinite(save.y) || save.y < 0 || save.y > WORLD.height) return null;
+    return {
+      cash: save.cash,
+      missionIndex: save.missionIndex,
+      x: save.x,
+      y: save.y,
+    };
   } catch {
     return null;
   }
@@ -72,6 +84,8 @@ function newGame() {
   state.saveExists = keepSaveFlag;
   state.screen = 'play';
   startCampaign(state);
+  audio.setSiren(false);
+  audio.setEngine(false);
   audio.unlock();
 }
 
@@ -80,7 +94,10 @@ function continueGame() {
   if (!save) return newGame();
   newGame();
   state.cash = save.cash;
-  if (save.missionIndex > 0) startMissionAt(state, Math.min(save.missionIndex, 4));
+  if (save.missionIndex > 0) startMissionAt(state, save.missionIndex);
+  // An index-4 save is a finished campaign: restore that fact explicitly, or
+  // a later bust would restart Mission 4 and pay its $2,000 a second time.
+  state.campaignDone = save.missionIndex >= 4;
   state.player.x = save.x;
   state.player.y = save.y;
   return undefined;
@@ -95,7 +112,11 @@ function resetAfterEnd() {
   state.bustTimer = 0;
   state.player.health = 100;
   state.player.dead = false;
+  state.player.speed = 0;
+  state.player.moving = false;
   if (state.player.car) exitCar(state);
+  audio.setSiren(false);
+  audio.setEngine(false);
   state.player.x = 330;
   state.player.y = 330;
   state.cash = cash;
@@ -154,7 +175,11 @@ function firePistol(fromKey) {
       bestT = t;
       endX = cop.x;
       endY = cop.y;
-      cop.damage = Math.min(100, (cop.damage || 0) + 26);
+      damageCar(cop, 26);
+      if (cop.damage >= 100) {
+        cop.wrecked = true;
+        cop.speed = 0;
+      }
       commitCrime(state, WANTED.hitPolice, p.x, p.y, true);
     }
   }
@@ -205,6 +230,11 @@ let saveTimer = 0;
 
 function step(dt) {
   state.time += dt;
+  if (state.screen !== 'play') {
+    input.consumeBlur();
+    audio.setSiren(false);
+    audio.setEngine(false);
+  }
   if (state.screen === 'title') {
     if (input.consume(ACTION_CONFIRM) || input.consumeClick()) newGame();
     return;
@@ -222,16 +252,17 @@ function step(dt) {
     return;
   }
   // Play.
-  if (input.consume(ACTION_PAUSE)) {
+  if (input.consume(ACTION_PAUSE) || input.consumeBlur()) {
     state.screen = 'paused';
+    audio.setSiren(false);
+    audio.setEngine(false);
     return;
   }
   const p = state.player;
   if (input.consume(ACTION_INTERACT)) {
     if (p.mode === 'foot') {
       const car = nearestEnterableCar(state);
-      if (car) {
-        enterCar(state, car);
+      if (car && enterCar(state, car)) {
         commitCrime(state, WANTED.carjack, p.x, p.y);
         onEnterCar(state, car);
       }
@@ -256,8 +287,24 @@ function step(dt) {
   updateTraffic(state, dt);
   updatePeds(state, dt);
   updatePolice(state, dt);
+  if (state.screen === 'busted') {
+    // A bust is terminal for this step: missions must not pay out, advance or
+    // replace it with the campaign-complete screen afterwards.
+    processEvents();
+    audio.setSiren(false);
+    audio.setEngine(false);
+    return;
+  }
   updateWanted(state, dt);
   updateCarContacts(state);
+  if (p.health <= 0) {
+    state.screen = 'over';
+    processEvents();
+    audio.busted();
+    audio.setSiren(false);
+    audio.setEngine(false);
+    return;
+  }
   updateMissions(state, dt);
   processEvents();
   // Timers and fading things.
@@ -267,17 +314,18 @@ function step(dt) {
   state.tracers = state.tracers.filter((t) => t.life > 0);
   for (const m of state.skidmarks) m.life -= dt;
   state.skidmarks = state.skidmarks.filter((m) => m.life > 0);
-  if (p.health <= 0 && state.screen === 'play') {
-    state.screen = 'over';
-    audio.busted();
-    audio.setSiren(false);
-  }
   saveTimer += dt;
   if (saveTimer > 5) {
     saveTimer = 0;
     writeSave();
   }
-  audio.setSiren(state.wanted > 0);
+  // Sound follows the actual state, not wanted level alone: terminal and
+  // complete screens are silent, and the engine only runs in a driven car.
+  audio.setSiren(state.screen === 'play' && state.wanted > 0);
+  audio.setEngine(
+    state.screen === 'play' && p.mode === 'car' && Boolean(p.car) && !p.car.wrecked,
+    p.car ? Math.abs(p.car.speed) / CAR.maxSpeed : 0,
+  );
   if (status) status.textContent = `${state.cash} dollars, ${state.wanted} stars`;
 }
 
@@ -301,12 +349,14 @@ if (shot) {
   const frame = (now) => {
     accumulator += Math.min(MAX_FRAME, (now - last) / 1000);
     last = now;
+    let stepped = false;
     while (accumulator >= STEP) {
       step(STEP);
       accumulator -= STEP;
+      stepped = true;
     }
     renderer.draw(state);
-    input.endFrame();
+    if (stepped) input.endFrame();
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

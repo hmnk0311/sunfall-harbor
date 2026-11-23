@@ -10,12 +10,20 @@ export function emit(state, name) {
   state.events.push(name);
 }
 
+/** Apply collision damage. The mission coupe is capped just short of a wreck:
+ * Marisol still needs it recognisable when it reaches the garage. */
+export function damageCar(car, amount) {
+  const cap = car.missionTarget ? 99 : 100;
+  car.damage = Math.min(cap, Math.max(0, (car.damage || 0) + amount));
+  return car.damage;
+}
+
 export function nearestEnterableCar(state, range = 58) {
   const p = state.player;
   let best = null;
   let bestD = range;
   for (const car of state.cars) {
-    if (car.driver) continue;
+    if (car.driver || car.wrecked || car.damage >= 100) continue;
     const d = dist(p.x, p.y, car.x, car.y);
     if (d < bestD) {
       bestD = d;
@@ -23,6 +31,7 @@ export function nearestEnterableCar(state, range = 58) {
     }
   }
   for (const car of state.police) {
+    if (car.wrecked || car.damage >= 100) continue;
     const d = dist(p.x, p.y, car.x, car.y);
     if (d < bestD) {
       bestD = d;
@@ -33,12 +42,24 @@ export function nearestEnterableCar(state, range = 58) {
 }
 
 export function enterCar(state, car) {
+  if (!car || car.wrecked || car.damage >= 100) return false;
   const p = state.player;
+  const policeIndex = state.police.indexOf(car);
+  if (policeIndex >= 0) {
+    // A stolen patrol car becomes an ordinary car in the player's hands. It
+    // must leave the police list so police AI, spawning and despawn truncation
+    // can no longer steer it or make the player's ride vanish.
+    state.police.splice(policeIndex, 1);
+    car.kind = 'civilian';
+    state.cars.push(car);
+  }
   p.mode = 'car';
   p.car = car;
+  p.speed = Math.abs(car.speed);
   car.driver = 'player';
   car.parked = false;
   emit(state, 'door');
+  return true;
 }
 
 export function exitCar(state) {
@@ -50,6 +71,8 @@ export function exitCar(state) {
   car.speed = 0;
   p.car = null;
   p.mode = 'foot';
+  p.speed = 0;
+  p.moving = false;
   // Step out on the left side of the car.
   p.x = car.x + Math.cos(car.angle - Math.PI / 2) * 30;
   p.y = car.y + Math.sin(car.angle - Math.PI / 2) * 30;
@@ -59,6 +82,8 @@ export function exitCar(state) {
 
 export function updatePlayerFoot(state, input, dt) {
   const p = state.player;
+  const startX = p.x;
+  const startY = p.y;
   const axis = input.moveAxis();
   const len = Math.hypot(axis.x, axis.y);
   if (len > 0) {
@@ -66,17 +91,33 @@ export function updatePlayerFoot(state, input, dt) {
     p.x += (axis.x / len) * speed * dt;
     p.y += (axis.y / len) * speed * dt;
     p.angle = Math.atan2(axis.y, axis.x);
-    p.moving = true;
-  } else {
-    p.moving = false;
   }
   collideWorld(state, p, p.radius);
+  // Police judge whether the player is effectively stopped from the movement
+  // that actually happened, not the keys held: pushing into a wall is stopped.
+  p.speed = dt > 0 ? Math.hypot(p.x - startX, p.y - startY) / dt : 0;
+  p.moving = p.speed > 1;
 }
 
 export function updatePlayerCar(state, input, dt) {
   const p = state.player;
   const car = p.car;
   if (!car) return;
+  if (car.wrecked || car.damage >= 100) {
+    car.wrecked = true;
+    car.speed = 0;
+    p.x = car.x;
+    p.y = car.y;
+    p.speed = 0;
+    if (!car.wreckNotified) {
+      // Damage from a ram or a collision in another module can wreck the car
+      // outside this function; give it the same one-time wreck outcome here.
+      car.wreckNotified = true;
+      p.health = Math.max(0, p.health - 25);
+      emit(state, 'wrecked');
+    }
+    return;
+  }
   const drive = input.drive();
   if (drive.throttle > 0) {
     car.speed += CAR.accel * dt;
@@ -103,7 +144,7 @@ export function updatePlayerCar(state, input, dt) {
   p.angle = car.angle;
   const pushed = collideWorld(state, car, CAR.radius - 4);
   if (pushed > 0.25 && Math.abs(car.speed) > 85) {
-    car.damage = Math.min(100, car.damage + Math.abs(car.speed) * 0.045);
+    damageCar(car, Math.abs(car.speed) * 0.045);
     emit(state, 'crash');
     scarePeds(state, car.x, car.y, 170);
     car.speed *= -0.22;
@@ -112,10 +153,13 @@ export function updatePlayerCar(state, input, dt) {
   }
   p.x = car.x;
   p.y = car.y;
-  if (car.damage >= 100 && !car.wrecked) {
+  p.speed = Math.abs(car.speed);
+  if (car.damage >= 100 && !car.wrecked && !car.missionTarget) {
     car.wrecked = true;
+    car.wreckNotified = true;
     car.speed = 0;
-    p.health = Math.max(20, p.health - 25);
+    p.speed = 0;
+    p.health = Math.max(0, p.health - 25);
     emit(state, 'wrecked');
   }
 }
@@ -124,7 +168,13 @@ export function updatePlayerCar(state, input, dt) {
 export function updateTraffic(state, dt) {
   const { random } = state;
   for (const car of state.cars) {
-    if (car.kind !== 'traffic' || car.driver) continue;
+    if (car.kind !== 'traffic' || car.driver || car.wrecked || car.damage >= 100) {
+      if (car.damage >= 100) {
+        car.wrecked = true;
+        car.speed = 0;
+      }
+      continue;
+    }
     car.turnCooldown -= dt;
     // Slow down for anything ahead in the same heading.
     let target = CAR.trafficSpeed;
@@ -202,16 +252,29 @@ export function updateCarContacts(state) {
         const ny = (b.y - a.y) / d;
         a.x -= nx * push; a.y -= ny * push;
         b.x += nx * push; b.y += ny * push;
-        const impact = Math.abs(a.speed - b.speed);
+        // Impact is the closing speed along the contact normal. Two cars at
+        // the same scalar speed can still hit hard head-on or side-on, while
+        // traffic moving together in one lane should not damage each other.
+        const avx = Math.cos(a.angle) * a.speed;
+        const avy = Math.sin(a.angle) * a.speed;
+        const bvx = Math.cos(b.angle) * b.speed;
+        const bvy = Math.sin(b.angle) * b.speed;
+        const impact = Math.abs((avx - bvx) * nx + (avy - bvy) * ny);
         if (impact > 120) {
-          a.damage = Math.min(100, (a.damage || 0) + impact * 0.03);
-          b.damage = Math.min(100, (b.damage || 0) + impact * 0.03);
+          damageCar(a, impact * 0.03);
+          damageCar(b, impact * 0.03);
+          for (const hit of [a, b]) {
+            if (hit.damage >= 100 && !hit.missionTarget) {
+              hit.wrecked = true;
+              hit.speed = 0;
+            }
+          }
           if (a.driver === 'player' || b.driver === 'player') {
             emit(state, 'crash');
             emit(state, 'hitcar');
           }
-          a.speed *= 0.55;
-          b.speed *= 0.55;
+          if (!a.wrecked) a.speed *= 0.55;
+          if (!b.wrecked) b.speed *= 0.55;
         }
       }
     }

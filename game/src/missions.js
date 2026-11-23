@@ -42,6 +42,11 @@ export function startCampaign(state) {
 export function startMissionAt(state, index) {
   if (index >= MISSIONS.length) {
     state.mission = { index: MISSIONS.length, stage: 'roam', timer: 0 };
+    state.campaignDone = true;
+    state.brief = null;
+    state.briefTimer = 0;
+    state.banner = null;
+    state.bannerTimer = 0;
     return;
   }
   state.mission = { index, stage: ['pickup', 'deliver', 'findgold', 'escape'][index], timer: index === 1 ? 80 : 0 };
@@ -63,11 +68,24 @@ function raiseHeatToThreeStars(state) {
 }
 
 export function spawnGoldCar(state) {
-  if (state.cars.some((c) => c.missionTarget)) return;
-  const gold = makeCar(GOLD_POS.x, GOLD_POS.y, Math.PI / 2, '#f5b921', 'civilian');
+  let gold = state.goldCar || state.cars.find((c) => c.missionTarget);
+  if (!gold) {
+    gold = makeCar(GOLD_POS.x, GOLD_POS.y, Math.PI / 2, '#f5b921', 'civilian');
+    gold.missionTarget = true;
+    state.cars.push(gold);
+  }
+  // A retry always restarts the job with the coupe back where Marisol left it:
+  // undamaged, parked and waiting at the Neon Row marker.
+  gold.x = GOLD_POS.x;
+  gold.y = GOLD_POS.y;
+  gold.angle = Math.PI / 2;
+  gold.speed = 0;
+  gold.damage = 0;
+  gold.wrecked = false;
+  gold.wreckNotified = false;
+  gold.driver = null;
   gold.parked = true;
   gold.missionTarget = true;
-  state.cars.push(gold);
   state.goldCar = gold;
 }
 
@@ -79,7 +97,10 @@ export function currentObjective(state) {
     case 'deliver': return { ...DELIVER_POS, label: 'Deliver to the Marina' };
     case 'findgold': return { ...GOLD_POS, label: 'Steal the golden coupe' };
     case 'delivercar': return { ...GARAGE_POS, label: 'Deliver the coupe to the garage' };
-    case 'escape': return { ...HIDEOUT_POS, label: 'Reach the hideout' };
+    case 'escape': return {
+      ...HIDEOUT_POS,
+      label: state.wanted > 0 ? 'Reach the hideout with 0 wanted stars' : 'Reach the hideout — you are clear',
+    };
     default: return null;
   }
 }
@@ -114,6 +135,9 @@ function payAndAdvance(state, nextIndex) {
   if (nextIndex >= MISSIONS.length) {
     state.mission = { index: MISSIONS.length, stage: 'roam', timer: 0 };
     state.campaignDone = true;
+    // Persist the final payment and completion before the COMPLETE screen can
+    // pause the normal autosave path.
+    emit(state, 'save');
     state.screen = 'complete';
     return;
   }
@@ -129,6 +153,31 @@ function payAndAdvance(state, nextIndex) {
   emit(state, 'save');
 }
 
+function failDelivery(state) {
+  const p = state.player;
+  // The buyer walked away: this attempt is over. Restart it from the pickup
+  // pier, with the package back in hand and a fresh clock, rather than merely
+  // handing the player another 80 seconds wherever they happened to stop.
+  if (p.mode === 'car' && p.car) {
+    p.car.x = PACKAGE_POS.x;
+    p.car.y = PACKAGE_POS.y;
+    p.car.angle = -Math.PI / 2;
+    p.car.speed = 0;
+    p.x = p.car.x;
+    p.y = p.car.y;
+    p.angle = p.car.angle;
+  } else {
+    p.x = PACKAGE_POS.x;
+    p.y = PACKAGE_POS.y;
+    p.angle = -Math.PI / 2;
+  }
+  state.mission.timer = 80;
+  state.banner = 'DELIVERY FAILED — TRY AGAIN FROM PIER 9';
+  state.bannerTimer = 3.2;
+  state.brief = MISSIONS[1].brief;
+  state.briefTimer = 7;
+}
+
 export function updateMissions(state, dt) {
   const m = state.mission;
   if (!m) return;
@@ -136,15 +185,17 @@ export function updateMissions(state, dt) {
   if (m.stage === 'deliver') {
     m.timer -= dt;
     if (m.timer <= 0) {
-      m.timer = 80;
-      state.banner = 'TOO SLOW — THE CLOCK RESTARTS';
-      state.bannerTimer = 2.6;
+      failDelivery(state);
+      return;
     }
   }
   const obj = currentObjective(state);
   if (!obj) return;
   const reach = m.stage === 'delivercar' || m.stage === 'deliver' ? 78 : 58;
-  if (dist(p.x, p.y, obj.x, obj.y) > reach) return;
+  if (dist(p.x, p.y, obj.x, obj.y) > reach) {
+    if (m.stage === 'escape') m.warnedAtHideout = false;
+    return;
+  }
   if (m.stage === 'pickup') {
     emit(state, 'pickup');
     payAndAdvance(state, 1);
@@ -153,6 +204,12 @@ export function updateMissions(state, dt) {
   } else if (m.stage === 'delivercar') {
     if (p.mode === 'car' && p.car && p.car.missionTarget) payAndAdvance(state, 3);
   } else if (m.stage === 'escape') {
-    payAndAdvance(state, 4);
+    if (state.wanted === 0) {
+      payAndAdvance(state, 4);
+    } else if (!m.warnedAtHideout) {
+      m.warnedAtHideout = true;
+      state.banner = 'LOSE EVERY STAR BEFORE YOU ENTER THE HIDEOUT';
+      state.bannerTimer = 2.4;
+    }
   }
 }

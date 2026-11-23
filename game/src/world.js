@@ -113,6 +113,7 @@ export function createGame(random) {
     buildings, parks, lots,
     player: {
       x: 330, y: 330, angle: 0, radius: PLAYER.radius, health: PLAYER.health,
+      speed: 0, moving: false,
       mode: 'foot', car: null, ammo: 12, reloading: 0, shootCooldown: 0,
       muzzle: 0, dead: false,
     },

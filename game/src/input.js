@@ -22,6 +22,7 @@ export function createInput(canvas) {
   const held = new Set();
   const pressed = new Set();
   const mouse = { x: 0, y: 0, down: false, clicked: false };
+  let blurred = false;
 
   window.addEventListener('keydown', (event) => {
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) event.preventDefault();
@@ -32,7 +33,13 @@ export function createInput(canvas) {
     }
   });
   window.addEventListener('keyup', (event) => held.delete(event.code));
-  window.addEventListener('blur', () => held.clear());
+  window.addEventListener('blur', () => {
+    blurred = true;
+    held.clear();
+    pressed.clear();
+    mouse.down = false;
+    mouse.clicked = false;
+  });
 
   canvas.addEventListener('mousemove', (event) => {
     const rect = canvas.getBoundingClientRect();
@@ -79,7 +86,16 @@ export function createInput(canvas) {
       mouse.clicked = false;
       return true;
     },
+    /** True once after the window loses focus, so the game can pause itself. */
+    consumeBlur() {
+      if (!blurred) return false;
+      blurred = false;
+      return true;
+    },
     endFrame() {
+      // The main loop calls this only after at least one simulation step has
+      // had a chance to consume the click. On high-refresh displays several
+      // rendered frames can pass between steps; clearing there lost clicks.
       mouse.clicked = false;
     },
   };

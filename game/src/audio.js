@@ -6,6 +6,9 @@ export function createAudio() {
   let ctx = null;
   let sirenOsc = null;
   let sirenGain = null;
+  let engineOsc = null;
+  let engineGain = null;
+  let engineFilter = null;
 
   function ensure() {
     if (ctx) {
@@ -96,6 +99,45 @@ export function createAudio() {
       blip(523, 0.12, 'sine', 0.14);
       setTimeout(() => blip(659, 0.12, 'sine', 0.14), 110);
       setTimeout(() => blip(784, 0.22, 'sine', 0.14), 220);
+    },
+    /** A minimal running engine: one filtered sawtooth whose pitch and level
+     * follow the driven car's speed. Calling it with `on` false stops it. */
+    setEngine(on, speedRatio = 0) {
+      const ac = ensure();
+      if (!ac) return;
+      const ratio = Math.max(0, Math.min(1, Math.abs(speedRatio) || 0));
+      try {
+        if (on && !engineOsc) {
+          engineOsc = ac.createOscillator();
+          engineGain = ac.createGain();
+          engineFilter = ac.createBiquadFilter();
+          engineOsc.type = 'sawtooth';
+          engineFilter.type = 'lowpass';
+          engineFilter.Q.value = 2;
+          engineGain.gain.value = 0;
+          engineOsc.connect(engineFilter).connect(engineGain).connect(ac.destination);
+          engineOsc.start();
+        }
+        if (on && engineOsc) {
+          const now = ac.currentTime;
+          const frequency = 42 + ratio * 105 + ratio * ratio * 35;
+          engineOsc.frequency.setTargetAtTime(frequency, now, 0.06);
+          engineFilter.frequency.setTargetAtTime(240 + ratio * 720, now, 0.08);
+          engineGain.gain.setTargetAtTime(0.018 + ratio * 0.04, now, 0.08);
+        } else if (!on && engineOsc) {
+          engineOsc.stop();
+          engineOsc.disconnect();
+          engineFilter.disconnect();
+          engineGain.disconnect();
+          engineOsc = null;
+          engineFilter = null;
+          engineGain = null;
+        }
+      } catch {
+        engineOsc = null;
+        engineFilter = null;
+        engineGain = null;
+      }
     },
     /** A two-tone siren that loops while the player is wanted; level 0 stops it. */
     setSiren(on) {

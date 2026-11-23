@@ -5,7 +5,7 @@
 import {
   FONT, PALETTE, PIERS, ROAD_W, ROAD_XS, ROAD_YS, WATER_Y, WORLD,
 } from './config.js';
-import { districtAt } from './world.js';
+import { dirAngle, districtAt } from './world.js';
 import { currentObjective, missionText } from './missions.js';
 
 export const SCREEN_TITLE = 'title';
@@ -145,18 +145,19 @@ export function createRenderer(canvas) {
         ctx.strokeRect(x, lot.y + 12, 52, lot.h - 24);
       }
     }
-    // Sidewalks, then roads, then dashes.
+    // Sidewalks, then roads, then dashes. North-south roads end at the
+    // harbour shoreline instead of being painted across the water.
     ctx.fillStyle = PALETTE.sidewalk;
-    for (const rx of ROAD_XS) ctx.fillRect(rx - ROAD_W / 2 - 16, 0, ROAD_W + 32, WORLD.height);
+    for (const rx of ROAD_XS) ctx.fillRect(rx - ROAD_W / 2 - 16, 0, ROAD_W + 32, WATER_Y);
     for (const ry of ROAD_YS) ctx.fillRect(0, ry - ROAD_W / 2 - 16, WORLD.width, ROAD_W + 32);
     ctx.fillStyle = PALETTE.road;
-    for (const rx of ROAD_XS) ctx.fillRect(rx - ROAD_W / 2, 0, ROAD_W, WORLD.height);
+    for (const rx of ROAD_XS) ctx.fillRect(rx - ROAD_W / 2, 0, ROAD_W, WATER_Y);
     for (const ry of ROAD_YS) ctx.fillRect(0, ry - ROAD_W / 2, WORLD.width, ROAD_W);
     ctx.strokeStyle = PALETTE.lane;
     ctx.lineWidth = 3;
     ctx.setLineDash([26, 30]);
     for (const rx of ROAD_XS) {
-      ctx.beginPath(); ctx.moveTo(rx, 0); ctx.lineTo(rx, WORLD.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx, 0); ctx.lineTo(rx, WATER_Y); ctx.stroke();
     }
     for (const ry of ROAD_YS) {
       ctx.beginPath(); ctx.moveTo(0, ry); ctx.lineTo(WORLD.width, ry); ctx.stroke();
@@ -285,14 +286,35 @@ export function createRenderer(canvas) {
         ctx.restore();
         continue;
       }
+      // A tiny oriented figure, not just a dot: a shoulder line and torso
+      // along the walking direction, with the head offset towards the front.
+      ctx.save();
+      ctx.translate(ped.x, ped.y);
+      ctx.rotate(dirAngle(ped.dir));
+      ctx.strokeStyle = ped.color;
+      ctx.lineWidth = 6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-2, -10);
+      ctx.lineTo(-2, 10);
+      ctx.stroke();
       ctx.fillStyle = ped.color;
       ctx.beginPath();
-      ctx.arc(ped.x, ped.y, ped.radius, 0, Math.PI * 2);
+      ctx.ellipse(-2, 0, 12, 9, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      ctx.beginPath();
+      ctx.ellipse(-6, 0, 5, 6.5, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '#f2c9a0';
       ctx.beginPath();
-      ctx.arc(ped.x, ped.y, 4.5, 0, Math.PI * 2);
+      ctx.arc(7, 0, 5.4, 0, Math.PI * 2);
       ctx.fill();
+      ctx.fillStyle = '#3a2a22';
+      ctx.beginPath();
+      ctx.arc(9, 0, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
   }
 
@@ -409,7 +431,7 @@ export function createRenderer(canvas) {
     ctx.strokeStyle = 'rgba(200,200,200,0.4)';
     ctx.lineWidth = 2;
     for (const rx of ROAD_XS) {
-      ctx.beginPath(); ctx.moveTo(mx + rx * sx, my); ctx.lineTo(mx + rx * sx, my + mh); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx + rx * sx, my); ctx.lineTo(mx + rx * sx, my + WATER_Y * sy); ctx.stroke();
     }
     for (const ry of ROAD_YS) {
       ctx.beginPath(); ctx.moveTo(mx, my + ry * sy); ctx.lineTo(mx + mw, my + ry * sy); ctx.stroke();

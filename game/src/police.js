@@ -3,7 +3,7 @@
 // player. Hide from every badge long enough and the heat drains away.
 import { POLICE, ROAD_XS, ROAD_YS, WANTED } from './config.js';
 import { collideWorld, dist, makeCar, witnessedBy } from './world.js';
-import { emit } from './vehicles.js';
+import { damageCar, emit } from './vehicles.js';
 
 export function starsForHeat(heat) {
   let stars = 0;
@@ -16,7 +16,8 @@ export function starsForHeat(heat) {
 /** A crime at (x, y): only adds heat when witnessed, unless `always` is set. */
 export function commitCrime(state, points, x, y, always = false) {
   if (!always && !witnessedBy(state, x, y)) return false;
-  state.wantedHeat += points;
+  const maxHeat = WANTED.thresholds[WANTED.thresholds.length - 1];
+  state.wantedHeat = Math.min(maxHeat, state.wantedHeat + points);
   state.stats.crimes += 1;
   state.hiddenTimer = 0;
   return true;
@@ -32,22 +33,28 @@ export function updateWanted(state, dt) {
     }
   }
   if (anyCopNear) {
+    // Detected means no cooling at all: a driver cannot lose the law by
+    // sitting beside a patrol car and waiting for the meter to run down.
     state.hiddenTimer = 0;
-  } else {
-    state.hiddenTimer += dt;
+    state.wanted = starsForHeat(state.wantedHeat);
+    return;
   }
+  state.hiddenTimer += dt;
   const escaping = state.hiddenTimer > 1.2 && state.wanted > 0;
   const rate = escaping ? WANTED.escapeDecayPerSecond : WANTED.decayPerSecond;
-  state.wantedHeat = Math.max(0, state.wantedHeat - rate * dt);
+  const maxHeat = WANTED.thresholds[WANTED.thresholds.length - 1];
+  state.wantedHeat = Math.min(maxHeat, Math.max(0, state.wantedHeat - rate * dt));
   state.wanted = starsForHeat(state.wantedHeat);
 }
 
 function spawnCop(state) {
   const p = state.player;
   const { random } = state;
+  const rx = ROAD_XS.reduce((a, b) => (Math.abs(b - p.x) < Math.abs(a - p.x) ? b : a));
+  const ry = ROAD_YS.reduce((a, b) => (Math.abs(b - p.y) < Math.abs(a - p.y) ? b : a));
+  let best = null;
+  let bestDistance = -1;
   for (let tries = 0; tries < 12; tries += 1) {
-    const rx = ROAD_XS.reduce((a, b) => (Math.abs(b - p.x) < Math.abs(a - p.x) ? b : a));
-    const ry = ROAD_YS.reduce((a, b) => (Math.abs(b - p.y) < Math.abs(a - p.y) ? b : a));
     const angle = random.range(0, Math.PI * 2);
     const x = Math.max(50, Math.min(2950, p.x + Math.cos(angle) * POLICE.spawnDistance));
     const y = Math.max(50, Math.min(2000, p.y + Math.sin(angle) * POLICE.spawnDistance));
@@ -55,9 +62,23 @@ function spawnCop(state) {
     const onX = Math.abs(x - rx) < Math.abs(y - ry);
     const cop = makeCar(onX ? rx : x, onX ? y : ry, 0, '#e8ecf2', 'police');
     cop.speed = 200;
-    state.police.push(cop);
-    return;
+    // Judge the separation only after clamping and road-snapping: either can
+    // move a nominal 620-unit spawn directly beside the player at a map edge.
+    const separation = dist(cop.x, cop.y, p.x, p.y);
+    if (separation > bestDistance) {
+      best = cop;
+      bestDistance = separation;
+    }
+    if (separation >= POLICE.spawnDistance * 0.8) {
+      state.police.push(cop);
+      return true;
+    }
   }
+  // No candidate in twelve tries kept a safe post-snap separation. Skip this
+  // spawn rather than materialising a patrol car on top of the player.
+  void best;
+  void bestDistance;
+  return false;
 }
 
 export function updatePolice(state, dt) {
@@ -67,17 +88,21 @@ export function updatePolice(state, dt) {
   if (state.police.length < desired) {
     state.spawnCooldown = (state.spawnCooldown || 0) - dt;
     if (state.spawnCooldown <= 0) {
-      spawnCop(state);
-      state.spawnCooldown = 1.4;
+      state.spawnCooldown = spawnCop(state) ? 1.4 : 0.35;
     }
   } else if (state.police.length > desired) {
     // Extra units peel off when the heat drops.
     state.police.length = desired;
   }
 
-  const playerSpeed = p.mode === 'car' && p.car ? Math.abs(p.car.speed) : (p.moving ? 170 : 0);
+  const playerSpeed = p.mode === 'car' && p.car ? Math.abs(p.car.speed) : (p.speed || 0);
   let pinning = false;
   for (const cop of state.police) {
+    if (cop.wrecked || cop.damage >= 100) {
+      cop.wrecked = true;
+      cop.speed = 0;
+      continue;
+    }
     const targetA = Math.atan2(p.y - cop.y, p.x - cop.x);
     let diff = targetA - cop.angle;
     while (diff > Math.PI) diff -= Math.PI * 2;
@@ -91,11 +116,17 @@ export function updatePolice(state, dt) {
     const pushed = collideWorld(state, cop, 20);
     if (pushed > 0.3) cop.speed *= 0.45;
     if (d < POLICE.bustRadius && playerSpeed < 55) pinning = true;
-    // Ramming the player's car: a shove and a crunch.
-    if (p.mode === 'car' && p.car && d < 44 && Math.abs(cop.speed) > 130) {
-      p.car.damage = Math.min(100, p.car.damage + 4);
-      cop.speed *= 0.6;
-      emit(state, 'crash');
+    // Ramming the player's car: judge the hit by their relative velocity,
+    // not the patrol car's speed alone, then apply the capped damage rule.
+    if (p.mode === 'car' && p.car && d < 44) {
+      const rvx = Math.cos(cop.angle) * cop.speed - Math.cos(p.car.angle) * p.car.speed;
+      const rvy = Math.sin(cop.angle) * cop.speed - Math.sin(p.car.angle) * p.car.speed;
+      const relativeSpeed = Math.hypot(rvx, rvy);
+      if (relativeSpeed > 130) {
+        damageCar(p.car, Math.min(10, relativeSpeed * 0.025));
+        cop.speed *= 0.6;
+        emit(state, 'crash');
+      }
     }
   }
   if (pinning && wanted > 0) {
